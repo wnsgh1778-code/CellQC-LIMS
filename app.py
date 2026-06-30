@@ -5,11 +5,11 @@ import json
 import pandas as pd
 import numpy as np
 from streamlit_calendar import calendar
+from sqlalchemy import text  # 🌟 [신규] 안전한 SQL 실행을 위한 통역사 추가!
 
 # ==========================================
 # 💾 클라우드 데이터베이스(Supabase PostgreSQL) 연결 설정
 # ==========================================
-# 더 이상 로컬 sqlite3 파일을 쓰지 않고, st.connection을 이용해 클라우드 DB와 소통합니다.
 conn = st.connection("postgresql", type="sql")
 
 # 1. 페이지 기본 설정 및 디자인
@@ -95,17 +95,14 @@ def check_adverse_trend(item_name, test_name, param_name, current_val):
     try: current_val_float = float(current_val)
     except: return None 
     
-    # Supabase에서 데이터 조회
     query = f"SELECT assignments FROM reception_logs WHERE item_name='{item_name}' AND coa_no IS NOT NULL AND coa_no != '' ORDER BY id ASC"
     df = conn.query(query, ttl="0")
     
     history = []
     for _, row in df.iterrows():
         try:
-            # PostgreSQL의 JSONB는 딕셔너리로 바로 읽힐 수 있으므로 타입 체크 추가
             assigns = row['assignments']
-            if isinstance(assigns, str):
-                assigns = json.loads(assigns)
+            if isinstance(assigns, str): assigns = json.loads(assigns)
                 
             if test_name in assigns:
                 res = assigns[test_name].get("result", {}).get(param_name)
@@ -160,7 +157,7 @@ if selected == "대시보드":
                 coa_val = str(row['coa_no']).strip() if pd.notnull(row['coa_no']) else ""
                 if is_all_completed and (coa_val == "" or coa_val == "-" or coa_val.lower() == "nan" or coa_val.lower() == "none"):
                     pending_coa_count += 1
-                    pending_coa_list.append({"접수 일자": row['reception_date'], "의뢰 구분": row['category'], "품명": row['item_name'], "제조번호": row['batch_no']})
+                    pending_coa_list.append({"접 일자": row['reception_date'], "의뢰 구분": row['category'], "품명": row['item_name'], "제조번호": row['batch_no']})
             except: continue
         
         st.write("")
@@ -233,14 +230,14 @@ elif selected == "시험 접수 및 배정":
                 tests_str = ", ".join(selected_tests)
                 assignments_json = json.dumps(test_assignments, ensure_ascii=False) 
                 
-                # 🌟 SQLAlchemy (클라우드 DB) 인서트 방식
+                # 🌟 [수정됨] text() 도장을 찍어서 쿼리를 안전하게 실행!
                 with conn.session as s:
                     s.execute(
-                        """
+                        text("""
                         INSERT INTO reception_logs 
                         (reception_date, req_date, category, item_name, item_code, batch_no, in_no, requester, selected_tests, assignments, remarks, test_no, coa_no, judgment)
                         VALUES (:reception_date, :req_date, :category, :item_name, :item_code, :batch_no, :in_no, :requester, :selected_tests, :assignments, :remarks, :test_no, :coa_no, :judgment)
-                        """,
+                        """),
                         {
                             "reception_date": str(reception_date), "req_date": str(req_date), "category": category,
                             "item_name": item_name, "item_code": item_code, "batch_no": batch_no, "in_no": in_no,
@@ -252,6 +249,7 @@ elif selected == "시험 접수 및 배정":
                 st.success("🎉 접수가 완료되었습니다!")
             except Exception as e: st.error(f"오류: {e}")
 
+
 # --- 📁 접수 대장 조회 ---
 elif selected == "접수 대장 조회":
     st.markdown('<div class="custom-header">📂 시험 접수 대장 조회</div>', unsafe_allow_html=True)
@@ -259,7 +257,6 @@ elif selected == "접수 대장 조회":
     
     if df.empty: st.info("아직 등록된 내역이 없습니다.")
     else:
-        # 데이터프레임 열 정리
         df['test_no'] = df['test_no'].fillna("-")
         df['coa_no'] = df['coa_no'].fillna("-")
         df['judgment'] = df['judgment'].fillna("")
@@ -314,14 +311,16 @@ elif selected == "접수 대장 조회":
                     with btn_e1:
                         if st.form_submit_button("🔄 수정 완료", type="primary"):
                             with conn.session as s:
-                                s.execute("UPDATE reception_logs SET item_name=:it, batch_no=:ba, test_no=:te, remarks=:re WHERE id=:id",
+                                # 🌟 [수정됨] text() 추가
+                                s.execute(text("UPDATE reception_logs SET item_name=:it, batch_no=:ba, test_no=:te, remarks=:re WHERE id=:id"),
                                           {"it": new_item, "ba": new_batch, "te": new_test_no, "re": new_remark, "id": target_id})
                                 s.commit()
                             st.rerun()
                     with btn_e2:
                         if st.form_submit_button("🗑️ 접수 취소"):
                             with conn.session as s:
-                                s.execute("DELETE FROM reception_logs WHERE id=:id", {"id": target_id})
+                                # 🌟 [수정됨] text() 추가
+                                s.execute(text("DELETE FROM reception_logs WHERE id=:id"), {"id": target_id})
                                 s.commit()
                             st.rerun()
 
@@ -438,7 +437,7 @@ elif selected == "전체 스케줄 보드":
                 st.rerun()
 
 
-# --- ✅ 결과 입력 (CoA) 창 (🌟 DI & Adverse Trend 기능 포함) ---
+# --- ✅ 결과 입력 (CoA) 창 ---
 elif selected == "결과 입력 (CoA)":
     st.markdown('<div class="custom-header">✅ 시험 결과 입력 및 CoA 발행</div>', unsafe_allow_html=True)
     st.write("💡 실제 결과값(Raw Data)과 판정(적합/부적합)을 입력하세요. 결과를 치지 않아도 임시 저장으로 판정 상태를 남길 수 있습니다.")
@@ -498,25 +497,20 @@ elif selected == "결과 입력 (CoA)":
                                 n_stat = "완료" if save_comp else "진행중"
                                 current_inputs = {}
                                 
-                                # 🌟 [신규] DI (데이터 무결성) 규칙 검사
                                 has_tntc = False
                                 for k, v in res_inputs.items():
                                     val = v.strip()
                                     if not val: continue
                                     
-                                    # 규칙 1: ND 처리
                                     if val.upper() in ["ND", "불검출", "NOT DETECTED"]:
                                         current_inputs[k] = "0"
                                         st.session_state.flash_msgs.append((f"[{k}] 'ND/불검출' 입력이 감지되어 통계를 위해 '0'으로 자동 변환되었습니다.", 'info'))
-                                    # 규칙 2: TNTC 처리
                                     elif val.upper() == "TNTC":
                                         current_inputs[k] = "TNTC"
                                         has_tntc = True
                                         st.session_state.flash_msgs.append((f"[{k}] 'TNTC' 입력이 감지되었습니다. OOS 조사를 준비하세요.", 'error'))
                                     else:
                                         current_inputs[k] = val
-                                        
-                                        # 🌟 [신규] Adverse Trend 감지 (숫자인 경우만)
                                         if n_stat == "완료":
                                             trend_msg = check_adverse_trend(item, test, k, val)
                                             if trend_msg: st.session_state.flash_msgs.append((trend_msg, 'warning'))
@@ -524,7 +518,8 @@ elif selected == "결과 입력 (CoA)":
                                 assignments[test] = {"assignee": assignee, "status": n_stat, "result": current_inputs, "pass_fail": new_pf}
                                 
                                 with conn.session as s:
-                                    s.execute("UPDATE reception_logs SET assignments=:ass WHERE id=:id", {"ass": json.dumps(assignments, ensure_ascii=False), "id": r_id})
+                                    # 🌟 [수정됨] text() 추가
+                                    s.execute(text("UPDATE reception_logs SET assignments=:ass WHERE id=:id"), {"ass": json.dumps(assignments, ensure_ascii=False), "id": r_id})
                                     s.commit()
                                 st.rerun()
                     else:
@@ -533,7 +528,8 @@ elif selected == "결과 입력 (CoA)":
                         if st.button("↩️ 수정하기 (진행중으로 되돌리기)", key=f"revert_{r_id}_{test}"):
                             assignments[test] = {"assignee": assignee, "status": "진행중", "result": result_dict, "pass_fail": pass_fail}
                             with conn.session as s:
-                                s.execute("UPDATE reception_logs SET assignments=:ass WHERE id=:id", {"ass": json.dumps(assignments, ensure_ascii=False), "id": r_id})
+                                # 🌟 [수정됨] text() 추가
+                                s.execute(text("UPDATE reception_logs SET assignments=:ass WHERE id=:id"), {"ass": json.dumps(assignments, ensure_ascii=False), "id": r_id})
                                 s.commit()
                             st.rerun()
                     st.write("")
@@ -548,7 +544,8 @@ elif selected == "결과 입력 (CoA)":
                     if col_c3.button("📄 CoA 성적서 발행 완료", key=f"coa_btn_{r_id}", type="primary"):
                         if new_coa_no:
                             with conn.session as s:
-                                s.execute("UPDATE reception_logs SET coa_no=:coa, judgment=:jdg WHERE id=:id", {"coa": new_coa_no, "jdg": final_jdg, "id": r_id})
+                                # 🌟 [수정됨] text() 추가
+                                s.execute(text("UPDATE reception_logs SET coa_no=:coa, judgment=:jdg WHERE id=:id"), {"coa": new_coa_no, "jdg": final_jdg, "id": r_id})
                                 s.commit()
                             st.success("CoA 발행 및 최종 판정이 완료되어 대장에 등록되었습니다!")
                             st.rerun()
