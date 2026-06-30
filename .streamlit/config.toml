@@ -1,0 +1,8 @@
+[theme]
+base="light"
+
+# 만약 우리가 앱에서 쓰던 오렌지 포인트 컬러와 배경색을 완벽하게 고정하고 싶다면 아래 설정까지 다 넣어주는 게 좋아!
+primaryColor="#FF9F68"
+backgroundColor="#F8F9FA"
+secondaryBackgroundColor="#FFFFFF"
+textColor="#333333"
