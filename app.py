@@ -5,7 +5,8 @@ import json
 import pandas as pd
 import numpy as np
 from streamlit_calendar import calendar
-from sqlalchemy import text  # 🌟 [신규] 안전한 SQL 실행을 위한 통역사 추가!
+from sqlalchemy import text
+import io
 
 # ==========================================
 # 💾 클라우드 데이터베이스(Supabase PostgreSQL) 연결 설정
@@ -30,14 +31,13 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # 🌟 플래시 메시지 시스템
-if 'flash_msgs' not in st.session_state:
-    st.session_state.flash_msgs = []
-
+if 'flash_msgs' not in st.session_state: st.session_state.flash_msgs = []
 if st.session_state.flash_msgs:
     for msg, level in st.session_state.flash_msgs:
         if level == 'warning': st.warning(msg, icon="⚠️")
         elif level == 'error': st.error(msg, icon="🚨")
         elif level == 'info': st.info(msg, icon="💡")
+        elif level == 'success': st.success(msg, icon="✅")
     st.session_state.flash_msgs = []
 
 # --- 🧠 데이터 기억 장치 초기화 ---
@@ -45,7 +45,7 @@ if 'custom_tests' not in st.session_state: st.session_state.custom_tests = []
 if 'test_groups' not in st.session_state:
     st.session_state.test_groups = {
         "A제품 기본시험 세트": ["확인 및 순도 시험", "pH 측정 시험", "엔도톡신시험"],
-        "세포주 출하 검사 세트": ["마이코플라스마부정시험(qPCR)", "외래성바이러스부정시험", "총 세포수 및 세포 생존율 시험", "무균시험(직접법)"]
+        "세포주 출하 검 세트": ["마이코플라스마부정시험(qPCR)", "외래성바이러스부정시험", "총 세포수 및 세포 생존율 시험", "무균시험(직접법)"]
     }
 if 'test_master' not in st.session_state:
     st.session_state.test_master = {
@@ -77,9 +77,9 @@ with st.sidebar:
     
     selected = option_menu(
         menu_title=None, 
-        options=["대시보드", "시험 접수 및 배정", "접수 대장 조회", "전체 스케줄 보드", "결과 입력 (CoA)", "PQR 경향 분석", "설정"],
-        icons=["house", "pencil-square", "table", "calendar-week", "check2-square", "graph-up", "gear"], 
-        default_index=1, 
+        options=["대시보드", "시험 접수 및 배정", "접수 대장 조회", "전체 스케줄 보드", "결과 입력 (CoA)", "시험 결과 조회", "PQR 경향 분석", "설정"],
+        icons=["house", "pencil-square", "table", "calendar-week", "check2-square", "search", "graph-up", "gear"], 
+        default_index=2, 
         styles={
             "container": {"padding": "0!important", "background-color": "#FFFFFF"},
             "icon": {"color": "#6C757D", "font-size": "16px"}, 
@@ -89,34 +89,27 @@ with st.sidebar:
     )
 
 # ==========================================
-# 🌟 Adverse Trend 감지 엔진 (클라우드 DB용으로 변경)
+# 🌟 Adverse Trend 감지 엔진
 # ==========================================
 def check_adverse_trend(item_name, test_name, param_name, current_val):
     try: current_val_float = float(current_val)
     except: return None 
-    
     query = f"SELECT assignments FROM reception_logs WHERE item_name='{item_name}' AND coa_no IS NOT NULL AND coa_no != '' ORDER BY id ASC"
     df = conn.query(query, ttl="0")
-    
     history = []
     for _, row in df.iterrows():
         try:
             assigns = row['assignments']
             if isinstance(assigns, str): assigns = json.loads(assigns)
-                
             if test_name in assigns:
                 res = assigns[test_name].get("result", {}).get(param_name)
                 if res is not None: history.append(float(res))
         except: pass
-
     history.append(current_val_float)
-    
     if len(history) >= 3:
         last_3 = history[-3:]
-        if last_3[0] < last_3[1] < last_3[2]:
-            return f"[{test_name} - {param_name}] 최근 3회 연속 상승 경향! (현재: {last_3[2]}) Adverse Trend 확인 요망."
-        if last_3[0] > last_3[1] > last_3[2]:
-            return f"[{test_name} - {param_name}] 최근 3회 연속 하락 경향! (현재: {last_3[2]}) Adverse Trend 확인 요망."
+        if last_3[0] < last_3[1] < last_3[2]: return f"[{test_name} - {param_name}] 최근 3회 연속 상승 경향! (현재: {last_3[2]}) Adverse Trend 확인 요망."
+        if last_3[0] > last_3[1] > last_3[2]: return f"[{test_name} - {param_name}] 최근 3회 연속 하락 경향! (현재: {last_3[2]}) Adverse Trend 확인 요망."
     return None
 
 # ==========================================
@@ -129,11 +122,10 @@ if selected == "대시보드":
     df = conn.query("SELECT * FROM reception_logs", ttl="0")
     
     if df.empty:
-        st.info("👋 환영합니다! 아직 등록된 데이터가 없습니다. 좌측 메뉴의 [시험 접수 및 배정]에서 첫 데이터를 등록해 보세요.")
+        st.info("👋 환영합니다! 아직 등록된 데이터가 없습니다.")
     else:
         today_str = datetime.date.today().strftime('%Y-%m-%d')
         today_receipts = len(df[df['reception_date'] == today_str])
-        
         total_ongoing, unassigned, pending_coa_count = 0, 0, 0
         team_members = ["이지은", "차승희", "서유리", "이준호", "이현지", "임현진"]
         assignee_counts = {name: 0 for name in team_members}
@@ -143,6 +135,9 @@ if selected == "대시보드":
             try:
                 assigns = row['assignments']
                 if isinstance(assigns, str): assigns = json.loads(assigns)
+                
+                # [안전장치] 과거 엑셀 데이터(Legacy)는 대시보드 집계에서 무조건 제외
+                if "Legacy Data" in assigns or row['coa_no'] == "엑셀이관": continue
                 
                 is_all_completed = True
                 for test, info in assigns.items():
@@ -157,10 +152,9 @@ if selected == "대시보드":
                 coa_val = str(row['coa_no']).strip() if pd.notnull(row['coa_no']) else ""
                 if is_all_completed and (coa_val == "" or coa_val == "-" or coa_val.lower() == "nan" or coa_val.lower() == "none"):
                     pending_coa_count += 1
-                    pending_coa_list.append({"접 일자": row['reception_date'], "의뢰 구분": row['category'], "품명": row['item_name'], "제조번호": row['batch_no']})
+                    pending_coa_list.append({"접수 일자": row['reception_date'], "의뢰 구분": row['category'], "품명": row['item_name'], "제조번호": row['batch_no']})
             except: continue
         
-        st.write("")
         col1, col2, col3, col4 = st.columns(4)
         with col1: st.metric(label="📅 오늘 신규 접수", value=f"{today_receipts} 건")
         with col2: st.metric(label="⏳ 진행 중인 시험", value=f"{total_ongoing} 개")
@@ -230,7 +224,6 @@ elif selected == "시험 접수 및 배정":
                 tests_str = ", ".join(selected_tests)
                 assignments_json = json.dumps(test_assignments, ensure_ascii=False) 
                 
-                # 🌟 [수정됨] text() 도장을 찍어서 쿼리를 안전하게 실행!
                 with conn.session as s:
                     s.execute(
                         text("""
@@ -250,9 +243,50 @@ elif selected == "시험 접수 및 배정":
             except Exception as e: st.error(f"오류: {e}")
 
 
-# --- 📁 접수 대장 조회 ---
+# --- 📁 접수 대장 조회 (🌟 기능 1: 과거 엑셀 데이터 Import 포함) ---
 elif selected == "접수 대장 조회":
-    st.markdown('<div class="custom-header">📂 시험 접수 대장 조회</div>', unsafe_allow_html=True)
+    st.markdown('<div class="custom-header">📂 시험 접수 대장 조회 및 데이터 관리</div>', unsafe_allow_html=True)
+    
+    # 🌟 [신규 기능 1] 엑셀 데이터 Import 기능
+    with st.expander("📥 과거 엑셀/CSV 데이터 일괄 업로드 (Import) - 클릭하여 열기"):
+        st.info("이곳에 업로드된 데이터는 시스템 로직과 충돌하지 않도록 **'완료된 과거 데이터'**로 취급되어 대장 조회와 결과 조회 화면에만 나타납니다. (진행 중 카운트 및 결과 입력 창에는 반영되지 않습니다.)")
+        
+        # 템플릿 다운로드 제공
+        template_df = pd.DataFrame(columns=["접수일자", "의뢰일자", "시험의뢰구분", "품명", "품목코드", "제조번호", "입고등록번호", "의뢰자", "시험항목", "비고", "성적번호(COA)", "최종판정"])
+        template_csv = template_df.to_csv(index=False).encode('utf-8-sig')
+        st.download_button("1️⃣ 엑셀 업로드용 템플릿 양식 다운로드", data=template_csv, file_name="Import_Template.csv", mime="text/csv")
+        
+        uploaded_file = st.file_uploader("2️⃣ 작성한 템플릿 파일(CSV)을 업로드하세요", type=["csv"])
+        if uploaded_file is not None:
+            try:
+                import_df = pd.read_csv(uploaded_file)
+                st.write(f"총 {len(import_df)}건의 데이터를 발견했습니다. 업로드를 진행할까요?")
+                if st.button("🚀 데이터 일괄 업로드 실행", type="primary"):
+                    with conn.session as s:
+                        for _, row in import_df.iterrows():
+                            # 과거 데이터 방어용 더미 JSON
+                            dummy_assigns = json.dumps({"Legacy Data": {"status": "완료", "pass_fail": str(row.get('최종판정', ''))}}, ensure_ascii=False)
+                            s.execute(
+                                text("""
+                                INSERT INTO reception_logs 
+                                (reception_date, req_date, category, item_name, item_code, batch_no, in_no, requester, selected_tests, assignments, remarks, test_no, coa_no, judgment)
+                                VALUES (:reception_date, :req_date, :category, :item_name, :item_code, :batch_no, :in_no, :requester, :selected_tests, :assignments, :remarks, :test_no, :coa_no, :judgment)
+                                """),
+                                {
+                                    "reception_date": str(row.get('접수일자', '')), "req_date": str(row.get('의뢰일자', '')), "category": str(row.get('시험의뢰구분', '')),
+                                    "item_name": str(row.get('품명', '')), "item_code": str(row.get('품목코드', '')), "batch_no": str(row.get('제조번호', '')), 
+                                    "in_no": str(row.get('입고등록번호', '')), "requester": str(row.get('의뢰자', '')), "selected_tests": str(row.get('시험항목', '')), 
+                                    "assignments": dummy_assigns, "remarks": str(row.get('비고', '')), 
+                                    "test_no": "-", "coa_no": str(row.get('성적번호(COA)', '엑셀이관')), "judgment": str(row.get('최종판정', ''))
+                                }
+                            )
+                        s.commit()
+                    st.session_state.flash_msgs.append((f"🎉 {len(import_df)}건의 과거 데이터가 성공적으로 대장에 등록되었습니다!", 'success'))
+                    st.rerun()
+            except Exception as e:
+                st.error(f"업로드 중 오류가 발생했습니다. 양식을 다시 확인해주세요. (에러: {e})")
+
+    st.markdown("---")
     df = conn.query("SELECT * FROM reception_logs ORDER BY id DESC", ttl="0")
     
     if df.empty: st.info("아직 등록된 내역이 없습니다.")
@@ -268,7 +302,6 @@ elif selected == "접수 대장 조회":
         
         st.markdown('<div class="sub-header" style="margin-top:0px;">🔍 맞춤형 대장 필터</div>', unsafe_allow_html=True)
         col_f1, col_f2, col_f3, col_f4 = st.columns(4)
-        
         with col_f1: sel_cat = st.selectbox("📌 의뢰 구분", ["전체"] + sorted(df_display['시험 의뢰 구분'].unique().tolist()))
         with col_f2: sel_item = st.multiselect("📦 품명 선택", sorted(df_display['품명'].unique().tolist()))
         with col_f3: sel_batch = st.multiselect("🔢 제조번호 선택", sorted(df_display['제조번호'].unique().tolist()))
@@ -289,40 +322,6 @@ elif selected == "접수 대장 조회":
         
         csv = df_display.to_csv(index=False).encode('utf-8-sig') 
         st.download_button("📥 현재 화면의 대장 엑셀(CSV) 다운로드", data=csv, file_name="QC_시험접수대장.csv", mime="text/csv")
-        
-        st.markdown("---")
-        st.markdown('<div class="sub-header">⚙️ 접수 내역 수정 및 취소(삭제)</div>', unsafe_allow_html=True)
-        with st.expander("데이터 수정 또는 삭제를 원하시면 여기를 클릭하세요."):
-            edit_options = df['id'].astype(str) + " - " + df['item_name'] + " (" + df['reception_date'] + ")"
-            selected_edit = st.selectbox("수정/삭제할 접수 건을 선택하세요", ["선택 안 함"] + edit_options.tolist())
-            if selected_edit != "선택 안 함":
-                target_id = selected_edit.split(" - ")[0]
-                target_row = df[df['id'] == int(target_id)].iloc[0]
-                with st.form("edit_form"):
-                    col_e1, col_e2 = st.columns(2)
-                    with col_e1:
-                        new_item = st.selectbox("품명 (변경)", st.session_state.item_master, index=st.session_state.item_master.index(target_row['item_name']) if target_row['item_name'] in st.session_state.item_master else 0)
-                        new_batch = st.text_input("제조번호", value=target_row['batch_no'] if target_row['batch_no'] else "")
-                    with col_e2:
-                        new_test_no = st.text_input("시험번호", value=target_row['test_no'] if target_row['test_no'] != "-" else "")
-                        new_remark = st.text_input("비고", value=target_row['remarks'] if target_row['remarks'] else "")
-                    
-                    btn_e1, btn_e2 = st.columns(2)
-                    with btn_e1:
-                        if st.form_submit_button("🔄 수정 완료", type="primary"):
-                            with conn.session as s:
-                                # 🌟 [수정됨] text() 추가
-                                s.execute(text("UPDATE reception_logs SET item_name=:it, batch_no=:ba, test_no=:te, remarks=:re WHERE id=:id"),
-                                          {"it": new_item, "ba": new_batch, "te": new_test_no, "re": new_remark, "id": target_id})
-                                s.commit()
-                            st.rerun()
-                    with btn_e2:
-                        if st.form_submit_button("🗑️ 접수 취소"):
-                            with conn.session as s:
-                                # 🌟 [수정됨] text() 추가
-                                s.execute(text("DELETE FROM reception_logs WHERE id=:id"), {"id": target_id})
-                                s.commit()
-                            st.rerun()
 
 
 # --- 📅 전체 스케줄 보드 창 ---
@@ -339,6 +338,7 @@ elif selected == "전체 스케줄 보드":
         try:
             assigns = row['assignments']
             if isinstance(assigns, str): assigns = json.loads(assigns)
+            if "Legacy Data" in assigns: continue # 엑셀 수입 데이터는 달력에서 제외
             for t, val in assigns.items():
                 all_tests.add(t)
                 all_assignees.add(val.get("assignee", "미정"))
@@ -369,6 +369,7 @@ elif selected == "전체 스케줄 보드":
         try:
             assigns = row['assignments']
             if isinstance(assigns, str): assigns = json.loads(assigns)
+            if "Legacy Data" in assigns: continue
         except: continue
 
         filtered_assignments = {}
@@ -440,19 +441,22 @@ elif selected == "전체 스케줄 보드":
 # --- ✅ 결과 입력 (CoA) 창 ---
 elif selected == "결과 입력 (CoA)":
     st.markdown('<div class="custom-header">✅ 시험 결과 입력 및 CoA 발행</div>', unsafe_allow_html=True)
-    st.write("💡 실제 결과값(Raw Data)과 판정(적합/부적합)을 입력하세요. 결과를 치지 않아도 임시 저장으로 판정 상태를 남길 수 있습니다.")
+    st.write("💡 실제 결과값(Raw Data)과 판정(적합/부적합)을 입력하세요.")
     
-    df = conn.query("SELECT id, reception_date, item_name, assignments, coa_no, test_no, batch_no FROM reception_logs WHERE coa_no IS NULL OR coa_no = '' ORDER BY id DESC", ttl="0")
+    # [방어 로직] coa_no가 없거나 비어있는 진짜 '진행 중' 데이터만 불러오기 (엑셀 이관 데이터 제외)
+    df = conn.query("SELECT id, reception_date, item_name, assignments, coa_no, test_no, batch_no FROM reception_logs WHERE (coa_no IS NULL OR coa_no = '') AND (coa_no != '엑셀이관') ORDER BY id DESC", ttl="0")
     
     if df.empty: st.info("현재 대기 중이거나 진행 중인 시험 내역이 없습니다.")
         
     for _, row in df.iterrows():
         r_id, date, item, assigns_data, coa_no, test_no_val, batch_val = row['id'], row['reception_date'], row['item_name'], row['assignments'], row['coa_no'], row['test_no'], row['batch_no']
-        t_no = test_no_val if test_no_val else "미부여"
         
         try:
             if isinstance(assigns_data, str): assignments = json.loads(assigns_data)
             else: assignments = assigns_data
+            
+            # 방어 로직 (엑셀 데이터가 실수로 잡히지 않도록)
+            if "Legacy Data" in assignments: continue
             
             for t, val in assignments.items():
                 if "pass_fail" not in val: val["pass_fail"] = "판정 전"
@@ -518,7 +522,6 @@ elif selected == "결과 입력 (CoA)":
                                 assignments[test] = {"assignee": assignee, "status": n_stat, "result": current_inputs, "pass_fail": new_pf}
                                 
                                 with conn.session as s:
-                                    # 🌟 [수정됨] text() 추가
                                     s.execute(text("UPDATE reception_logs SET assignments=:ass WHERE id=:id"), {"ass": json.dumps(assignments, ensure_ascii=False), "id": r_id})
                                     s.commit()
                                 st.rerun()
@@ -528,7 +531,6 @@ elif selected == "결과 입력 (CoA)":
                         if st.button("↩️ 수정하기 (진행중으로 되돌리기)", key=f"revert_{r_id}_{test}"):
                             assignments[test] = {"assignee": assignee, "status": "진행중", "result": result_dict, "pass_fail": pass_fail}
                             with conn.session as s:
-                                # 🌟 [수정됨] text() 추가
                                 s.execute(text("UPDATE reception_logs SET assignments=:ass WHERE id=:id"), {"ass": json.dumps(assignments, ensure_ascii=False), "id": r_id})
                                 s.commit()
                             st.rerun()
@@ -544,13 +546,80 @@ elif selected == "결과 입력 (CoA)":
                     if col_c3.button("📄 CoA 성적서 발행 완료", key=f"coa_btn_{r_id}", type="primary"):
                         if new_coa_no:
                             with conn.session as s:
-                                # 🌟 [수정됨] text() 추가
                                 s.execute(text("UPDATE reception_logs SET coa_no=:coa, judgment=:jdg WHERE id=:id"), {"coa": new_coa_no, "jdg": final_jdg, "id": r_id})
                                 s.commit()
                             st.success("CoA 발행 및 최종 판정이 완료되어 대장에 등록되었습니다!")
                             st.rerun()
                         else: st.error("성적번호를 입력하세요.")
         except: pass
+
+
+# --- 🔎 시험 결과 조회 (🌟 기능 2: 완료된 시험 상세 조회) ---
+elif selected == "시험 결과 조회":
+    st.markdown('<div class="custom-header">🔎 시험 결과 및 판정 상세 조회</div>', unsafe_allow_html=True)
+    st.write("발행 완료된 성적서(CoA) 및 과거 데이터를 기반으로 각 품목의 최종 결과와 세부 시험 항목의 결과를 조회합니다.")
+    
+    # CoA가 발행되었거나 엑셀로 이관된(완료된) 데이터만 가져오기
+    df = conn.query("SELECT * FROM reception_logs WHERE coa_no IS NOT NULL AND coa_no != '' AND coa_no != '-' ORDER BY id DESC", ttl="0")
+    
+    if df.empty:
+        st.info("현재 조회가 가능한 완료된 시험 데이터가 없습니다.")
+    else:
+        # 상단 필터부
+        col_s1, col_s2, col_s3, col_s4 = st.columns(4)
+        with col_s1: search_item = st.multiselect("📦 품명 선택", sorted(df['item_name'].dropna().unique().tolist()))
+        with col_s2: search_testno = st.multiselect("🏷️ 시험번호 선택", sorted(df[df['test_no'] != '-']['test_no'].dropna().unique().tolist()))
+        with col_s3: search_batch = st.multiselect("🔢 제조번호 선택", sorted(df['batch_no'].dropna().unique().tolist()))
+        with col_s4: search_inno = st.multiselect("📥 입고번호 선택", sorted(df['in_no'].dropna().unique().tolist()))
+
+        if search_item: df = df[df['item_name'].isin(search_item)]
+        if search_testno: df = df[df['test_no'].isin(search_testno)]
+        if search_batch: df = df[df['batch_no'].isin(search_batch)]
+        if search_inno: df = df[df['in_no'].isin(search_inno)]
+
+        st.markdown("---")
+        st.markdown(f"**총 {len(df)}건의 완료된 데이터를 찾았습니다.**")
+        
+        for _, row in df.iterrows():
+            item = row['item_name']
+            batch = row['batch_no']
+            test_no = row['test_no']
+            in_no = row['in_no']
+            coa_no = row['coa_no']
+            jdg = row['judgment']
+            
+            # 판정 색상 부여
+            jdg_color = "red" if jdg == "부적합" else "green"
+            
+            with st.expander(f"📄 [{item}] 제조번호: {batch} | 성적번호: {coa_no} | 판정: {jdg}"):
+                c1, c2, c3, c4 = st.columns(4)
+                c1.write(f"**시험번호:** {test_no}")
+                c2.write(f"**입고번호:** {in_no}")
+                c3.write(f"**접수일자:** {row['reception_date']}")
+                c4.markdown(f"**최종판정:** <span style='color:{jdg_color}; font-weight:bold;'>{jdg}</span>", unsafe_allow_html=True)
+                
+                st.markdown("<hr style='margin:10px 0px;'>", unsafe_allow_html=True)
+                
+                try:
+                    assigns = row['assignments']
+                    if isinstance(assigns, str): assigns = json.loads(assigns)
+                    
+                    if "Legacy Data" in assigns:
+                        st.info("📌 엑셀에서 이관된 과거 데이터이므로 세부 결과(Raw Data)는 원본 엑셀을 참조하세요.")
+                    else:
+                        result_list = []
+                        for t_name, info in assigns.items():
+                            assignee = info.get("assignee", "-")
+                            pf = info.get("pass_fail", "-")
+                            res_dict = info.get("result", {})
+                            res_str = " / ".join([f"{k}: {v}" for k, v in res_dict.items() if v])
+                            result_list.append({"시험항목": t_name, "담당자": assignee, "입력 결과(Raw Data)": res_str, "항목별 판정": pf})
+                        
+                        if result_list:
+                            res_df = pd.DataFrame(result_list)
+                            st.dataframe(res_df, use_container_width=True, hide_index=True)
+                except:
+                    st.write("세부 데이터 파싱 오류")
 
 
 # --- 📈 PQR 경향 분석 ---
@@ -568,6 +637,7 @@ elif selected == "PQR 경향 분석":
             try:
                 assigns = row['assignments']
                 if isinstance(assigns, str): assigns = json.loads(assigns)
+                if "Legacy Data" in assigns: continue # 엑셀 데이터는 PQR 통계에서 제외
                 for t_name, info in assigns.items():
                     res_dict = info.get("result", {})
                     if isinstance(res_dict, dict):
