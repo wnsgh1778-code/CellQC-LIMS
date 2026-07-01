@@ -243,6 +243,7 @@ elif selected == "시험 접수 및 배정":
             except Exception as e: st.error(f"오류: {e}")
 
 
+# ... existing code ...
 # --- 📁 접수 대장 조회 (🌟 기능 1: 과거 엑셀 데이터 Import 포함) ---
 elif selected == "접수 대장 조회":
     st.markdown('<div class="custom-header">📂 시험 접수 대장 조회 및 데이터 관리</div>', unsafe_allow_html=True)
@@ -285,6 +286,16 @@ elif selected == "접수 대장 조회":
                     st.rerun()
             except Exception as e:
                 st.error(f"업로드 중 오류가 발생했습니다. 양식을 다시 확인해주세요. (에러: {e})")
+        
+        # 🌟 [신규 추가] 테스트 데이터 일괄 초기화 버튼
+        st.markdown("---")
+        st.markdown("💡 **테스트 업로드를 지우고 싶으신가요?** 아래 버튼을 누르면 엑셀로 업로드했던 데이터만 한 번에 싹 지워집니다. (직접 수기로 접수한 진짜 데이터는 안전합니다!)")
+        if st.button("🗑️ 엑셀 업로드 데이터(엑셀이관) 전체 일괄 삭제", type="secondary"):
+            with conn.session as s:
+                s.execute(text("DELETE FROM reception_logs WHERE coa_no = '엑셀이관'"))
+                s.commit()
+            st.session_state.flash_msgs.append(("🗑️ 엑셀로 업로드된 테스트 데이터가 모두 초기화되었습니다.", 'info'))
+            st.rerun()
 
     st.markdown("---")
     df = conn.query("SELECT * FROM reception_logs ORDER BY id DESC", ttl="0")
@@ -322,6 +333,43 @@ elif selected == "접수 대장 조회":
         
         csv = df_display.to_csv(index=False).encode('utf-8-sig') 
         st.download_button("📥 현재 화면의 대장 엑셀(CSV) 다운로드", data=csv, file_name="QC_시험접수대장.csv", mime="text/csv")
+        
+        # 🌟 [신규 추가] 개별 데이터 수정/삭제 UI
+        st.markdown("---")
+        st.markdown('<div class="sub-header">⚙️ 개별 접수 내역 수정 및 취소(삭제)</div>', unsafe_allow_html=True)
+        with st.expander("데이터 수정 또는 개별 삭제를 원하시면 여기를 클릭하세요."):
+            edit_options = df['id'].astype(str) + " - " + df['item_name'] + " (" + df['reception_date'] + ")"
+            selected_edit = st.selectbox("수정/삭제할 접수 건을 선택하세요", ["선택 안 함"] + edit_options.tolist())
+            if selected_edit != "선택 안 함":
+                target_id = selected_edit.split(" - ")[0]
+                target_row = df[df['id'] == int(target_id)].iloc[0]
+                with st.form("edit_form"):
+                    col_e1, col_e2 = st.columns(2)
+                    with col_e1:
+                        new_item = st.selectbox("품명 (변경)", st.session_state.item_master, index=st.session_state.item_master.index(target_row['item_name']) if target_row['item_name'] in st.session_state.item_master else 0)
+                        new_batch = st.text_input("제조번호", value=target_row['batch_no'] if target_row['batch_no'] else "")
+                    with col_e2:
+                        new_test_no = st.text_input("시험번호", value=target_row['test_no'] if target_row['test_no'] != "-" else "")
+                        new_remark = st.text_input("비고", value=target_row['remarks'] if target_row['remarks'] else "")
+                    
+                    btn_e1, btn_e2 = st.columns(2)
+                    with btn_e1:
+                        if st.form_submit_button("🔄 수정 완료", type="primary"):
+                            with conn.session as s:
+                                s.execute(text("UPDATE reception_logs SET item_name=:it, batch_no=:ba, test_no=:te, remarks=:re WHERE id=:id"),
+                                          {"it": new_item, "ba": new_batch, "te": new_test_no, "re": new_remark, "id": target_id})
+                                s.commit()
+                            st.session_state.flash_msgs.append(("수정이 완료되었습니다.", "success"))
+                            st.rerun()
+                    with btn_e2:
+                        if st.form_submit_button("🗑️ 접수 취소(삭제)"):
+                            with conn.session as s:
+                                s.execute(text("DELETE FROM reception_logs WHERE id=:id"), {"id": target_id})
+                                s.commit()
+                            st.session_state.flash_msgs.append(("해당 데이터가 삭제되었습니다.", "success"))
+                            st.rerun()
+
+# --- 📅 전체 스케줄 보드 창 ---
 
 
 # --- 📅 전체 스케줄 보드 창 ---
