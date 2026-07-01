@@ -45,7 +45,7 @@ if 'custom_tests' not in st.session_state: st.session_state.custom_tests = []
 if 'test_groups' not in st.session_state:
     st.session_state.test_groups = {
         "A제품 기본시험 세트": ["확인 및 순도 시험", "pH 측정 시험", "엔도톡신시험"],
-        "세포주 출하 검 세트": ["마이코플라스마부정시험(qPCR)", "외래성바이러스부정시험", "총 세포수 및 세포 생존율 시험", "무균시험(직접법)"]
+        "세포주 출하 검사 세트": ["마이코플라스마부정시험(qPCR)", "외래성바이러스부정시험", "총 세포수 및 세포 생존율 시험", "무균시험(직접법)"]
     }
 if 'test_master' not in st.session_state:
     st.session_state.test_master = {
@@ -243,7 +243,6 @@ elif selected == "시험 접수 및 배정":
             except Exception as e: st.error(f"오류: {e}")
 
 
-# ... existing code ...
 # --- 📁 접수 대장 조회 (🌟 기능 1: 과거 엑셀 데이터 Import 포함) ---
 elif selected == "접수 대장 조회":
     st.markdown('<div class="custom-header">📂 시험 접수 대장 조회 및 데이터 관리</div>', unsafe_allow_html=True)
@@ -260,9 +259,17 @@ elif selected == "접수 대장 조회":
         uploaded_file = st.file_uploader("2️⃣ 작성한 템플릿 파일(CSV)을 업로드하세요", type=["csv"])
         if uploaded_file is not None:
             try:
-                import_df = pd.read_csv(uploaded_file)
-                st.write(f"총 {len(import_df)}건의 데이터를 발견했습니다. 업로드를 진행할까요?")
-                if st.button("🚀 데이터 일괄 업로드 실행", type="primary"):
+                # 🌟 [수정됨] 엑셀(한글) 인코딩 호환성 문제 완벽 해결
+                try:
+                    import_df = pd.read_csv(uploaded_file, encoding='utf-8-sig')
+                except UnicodeDecodeError:
+                    uploaded_file.seek(0) # 커서를 다시 처음으로 되돌림
+                    import_df = pd.read_csv(uploaded_file, encoding='cp949') # 한국형 엑셀 인코딩으로 재시도
+                    
+                st.success(f"✅ 파일을 성공적으로 읽었습니다! (총 {len(import_df)}건의 데이터 확인)")
+                
+                # 버튼을 화면 꽉 차게 눈에 잘 띄도록 수정
+                if st.button("🚀 데이터 일괄 업로드 실행", type="primary", use_container_width=True):
                     with conn.session as s:
                         for _, row in import_df.iterrows():
                             # 과거 데이터 방어용 더미 JSON
@@ -368,9 +375,6 @@ elif selected == "접수 대장 조회":
                                 s.commit()
                             st.session_state.flash_msgs.append(("해당 데이터가 삭제되었습니다.", "success"))
                             st.rerun()
-
-# --- 📅 전체 스케줄 보드 창 ---
-
 
 # --- 📅 전체 스케줄 보드 창 ---
 elif selected == "전체 스케줄 보드":
