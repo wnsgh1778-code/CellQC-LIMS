@@ -40,23 +40,70 @@ if st.session_state.flash_msgs:
         elif level == 'success': st.success(msg, icon="✅")
     st.session_state.flash_msgs = []
 
-# --- 🧠 데이터 기억 장치 초기화 ---
-if 'custom_tests' not in st.session_state: st.session_state.custom_tests = [] 
-if 'test_groups' not in st.session_state:
-    st.session_state.test_groups = {
+# ==========================================
+# 🌟 [제안1 기능] 시스템 설정 마스터 DB 영구 보존 엔진
+# ==========================================
+# 1. 설정 저장용 테이블이 없으면 자동 생성
+try:
+    with conn.session as s:
+        s.execute(text("""
+            CREATE TABLE IF NOT EXISTS system_settings (
+                setting_key TEXT PRIMARY KEY,
+                setting_value JSONB
+            )
+        """))
+        s.commit()
+except Exception as e:
+    st.error(f"설정 테이블 초기화 오류: {e}")
+
+# 2. 설정을 메모리와 DB에 동시 저장하는 함수
+def save_setting(key, value):
+    st.session_state[key] = value
+    try:
+        with conn.session as s:
+            s.execute(text("""
+                INSERT INTO system_settings (setting_key, setting_value) 
+                VALUES (:k, :v)
+                ON CONFLICT (setting_key) DO UPDATE SET setting_value = EXCLUDED.setting_value
+            """), {"k": key, "v": json.dumps(value, ensure_ascii=False)})
+            s.commit()
+    except Exception as e:
+        st.error(f"설정 DB 저장 중 오류: {e}")
+
+# 3. 기본값 정의 및 DB에서 불러오기 로직
+default_settings = {
+    'custom_tests': [],
+    'test_groups': {
         "A제품 기본시험 세트": ["확인 및 순도 시험", "pH 측정 시험", "엔도톡신시험"],
         "세포주 출하 검사 세트": ["마이코플라스마부정시험(qPCR)", "외래성바이러스부정시험", "총 세포수 및 세포 생존율 시험", "무균시험(직접법)"]
-    }
-if 'test_master' not in st.session_state:
-    st.session_state.test_master = {
+    },
+    'test_master': {
         "불용성미립자시험": ["≥10㎛", "≥25㎛"],
         "확인 및 순도 시험": ["CD56+(%)", "CD16+(%)", "CD19+(%)", "CD3+(%)", "CD14+(%)"]
-    }
-if 'item_master' not in st.session_state:
-    st.session_state.item_master = [
+    },
+    'item_master': [
         "DWDP-006", "DWDP-004", "DWCB-001", "1N NaOH solution", 
         "1X CTSTM DPBS", "MEM-alpha", "PBMC", "EXOEF1"
     ]
+}
+
+try:
+    df_settings = conn.query("SELECT setting_key, setting_value FROM system_settings", ttl="0")
+    db_settings = dict(zip(df_settings['setting_key'], df_settings['setting_value']))
+except:
+    db_settings = {}
+
+for key, default_val in default_settings.items():
+    if key not in st.session_state:
+        if key in db_settings:
+            val = db_settings[key]
+            # 문자열로 들어온 JSON 처리
+            if isinstance(val, str): st.session_state[key] = json.loads(val)
+            else: st.session_state[key] = val
+        else:
+            save_setting(key, default_val) # DB에 없으면 기본값으로 최초 1회 저장
+
+# UI 전용 상태 (DB 저장 안 함)
 if 'expanded_groups' not in st.session_state: st.session_state.expanded_groups = set()
 if 'last_clicked_event' not in st.session_state: st.session_state.last_clicked_event = None
 
@@ -136,7 +183,6 @@ if selected == "대시보드":
                 assigns = row['assignments']
                 if isinstance(assigns, str): assigns = json.loads(assigns)
                 
-                # [안전장치] 과거 엑셀 데이터(Legacy)는 대시보드 집계에서 무조건 제외
                 if "Legacy Data" in assigns or row['coa_no'] == "엑셀이관": continue
                 
                 is_all_completed = True
@@ -239,72 +285,15 @@ elif selected == "시험 접수 및 배정":
                         }
                     )
                     s.commit()
-                st.success("🎉 접수가 완료되었습니다!")
+                st.session_state.flash_msgs.append(("🎉 접수가 완료되었습니다!", "success"))
+                st.rerun()
             except Exception as e: st.error(f"오류: {e}")
 
 
-# --- 📁 접수 대장 조회 (🌟 기능 1: 과거 엑셀 데이터 Import 포함) ---
+# --- 📁 접수 대장 조회 ---
 elif selected == "접수 대장 조회":
     st.markdown('<div class="custom-header">📂 시험 접수 대장 조회 및 데이터 관리</div>', unsafe_allow_html=True)
     
-    # 🌟 [수정됨] expanded=True 를 추가하여 파일 업로드 후 화면이 새로고침돼도 창이 닫히지 않게 고정!
-    with st.expander("📥 과거 엑셀/CSV 데이터 일괄 업로드 (Import) - 클릭하여 열기", expanded=True):
-        st.info("이곳에 업로드된 데이터는 시스템 로직과 충돌하지 않도록 **'완료된 과거 데이터'**로 취급되어 대장 조회와 결과 조회 화면에만 나타납니다. (진행 중 카운트 및 결과 입력 창에는 반영되지 않습니다.)")
-        
-        # 템플릿 다운로드 제공 (실제 대장 컬럼과 100% 동일하게 매핑!)
-        template_df = pd.DataFrame(columns=["접수 일자", "품명", "품목 코드", "제조번호", "입고등록번호", "의뢰 일자", "시험 의뢰 구분", "시험 의뢰 항목", "시험 번호", "의뢰자", "비고", "COA 발행 여부(성적번호)", "판정"])
-        template_csv = template_df.to_csv(index=False).encode('utf-8-sig')
-        st.download_button("1️⃣ 엑셀 업로드용 템플릿 양식 다운로드 (대장과 동일)", data=template_csv, file_name="Import_Template.csv", mime="text/csv")
-        
-        uploaded_file = st.file_uploader("2️⃣ 작성한 템플릿 파일(CSV)을 업로드하세요", type=["csv"])
-        if uploaded_file is not None:
-            try:
-                # 🌟 [수정됨] 메모리 버퍼 방식으로 파일 읽기 강화 (인코딩 및 읽기 에러 완벽 차단)
-                bytes_data = uploaded_file.getvalue()
-                try:
-                    import_df = pd.read_csv(io.BytesIO(bytes_data), encoding='utf-8-sig')
-                except UnicodeDecodeError:
-                    import_df = pd.read_csv(io.BytesIO(bytes_data), encoding='cp949')
-                    
-                st.success(f"✅ 파일을 성공적으로 읽었습니다! (총 {len(import_df)}건의 데이터 확인)")
-                
-                # 버튼을 화면 꽉 차게 눈에 잘 띄도록 수정
-                if st.button("🚀 데이터 일괄 업로드 실행", type="primary", use_container_width=True):
-                    with conn.session as s:
-                        for _, row in import_df.iterrows():
-                            # 과거 데이터 방어용 더미 JSON
-                            dummy_assigns = json.dumps({"Legacy Data": {"status": "완료", "pass_fail": str(row.get('판정', ''))}}, ensure_ascii=False)
-                            s.execute(
-                                text("""
-                                INSERT INTO reception_logs 
-                                (reception_date, req_date, category, item_name, item_code, batch_no, in_no, requester, selected_tests, assignments, remarks, test_no, coa_no, judgment)
-                                VALUES (:reception_date, :req_date, :category, :item_name, :item_code, :batch_no, :in_no, :requester, :selected_tests, :assignments, :remarks, :test_no, :coa_no, :judgment)
-                                """),
-                                {
-                                    "reception_date": str(row.get('접수 일자', '')), "req_date": str(row.get('의뢰 일자', '')), "category": str(row.get('시험 의뢰 구분', '')),
-                                    "item_name": str(row.get('품명', '')), "item_code": str(row.get('품목 코드', '')), "batch_no": str(row.get('제조번호', '')), 
-                                    "in_no": str(row.get('입고등록번호', '')), "requester": str(row.get('의뢰자', '')), "selected_tests": str(row.get('시험 의뢰 항목', '')), 
-                                    "assignments": dummy_assigns, "remarks": str(row.get('비고', '')), 
-                                    "test_no": str(row.get('시험 번호', '-')), "coa_no": str(row.get('COA 발행 여부(성적번호)', '엑셀이관')), "judgment": str(row.get('판정', ''))
-                                }
-                            )
-                        s.commit()
-                    st.session_state.flash_msgs.append((f"🎉 {len(import_df)}건의 과거 데이터가 성공적으로 대장에 등록되었습니다!", 'success'))
-                    st.rerun()
-            except Exception as e:
-                st.error(f"업로드 중 오류가 발생했습니다. 양식을 다시 확인해주세요. (에러: {e})")
-        
-        # 🌟 [신규 추가] 테스트 데이터 일괄 초기화 버튼
-        st.markdown("---")
-        st.markdown("💡 **테스트 업로드를 지우고 싶으신가요?** 아래 버튼을 누르면 엑셀로 업로드했던 데이터만 한 번에 싹 지워집니다. (직접 수기로 접수한 진짜 데이터는 안전합니다!)")
-        if st.button("🗑️ 엑셀 업로드 데이터(엑셀이관) 전체 일괄 삭제", type="secondary"):
-            with conn.session as s:
-                s.execute(text("DELETE FROM reception_logs WHERE coa_no = '엑셀이관'"))
-                s.commit()
-            st.session_state.flash_msgs.append(("🗑️ 엑셀로 업로드된 테스트 데이터가 모두 초기화되었습니다.", 'info'))
-            st.rerun()
-
-    st.markdown("---")
     df = conn.query("SELECT * FROM reception_logs ORDER BY id DESC", ttl="0")
     
     if df.empty: st.info("아직 등록된 내역이 없습니다.")
@@ -315,10 +304,19 @@ elif selected == "접수 대장 조회":
         df.loc[df['coa_no'] == "", 'coa_no'] = "-"
         df.loc[df['judgment'] == "", 'judgment'] = "-"
         
-        df_display = df[['id', 'item_name', 'item_code', 'batch_no', 'in_no', 'req_date', 'category', 'selected_tests', 'test_no', 'requester', 'remarks', 'coa_no', 'judgment']]
-        df_display.columns = ['번호', '품명', '품목 코드', '제조번호', '입고등록번호', '의뢰 일자', '시험 의뢰 구분', '시험 의뢰 항목', '시험 번호', '의뢰자', '비고', 'COA 발행 여부(성적번호)', '판정']
+        # 🌟 '접수 일자'를 표에 복구시킴
+        df_display = df[['id', 'reception_date', 'item_name', 'item_code', 'batch_no', 'in_no', 'req_date', 'category', 'selected_tests', 'test_no', 'requester', 'remarks', 'coa_no', 'judgment']]
+        df_display.columns = ['번호', '접수 일자', '품명', '품목 코드', '제조번호', '입고등록번호', '의뢰 일자', '시험 의뢰 구분', '시험 의뢰 항목', '시험 번호', '의뢰자', '비고', 'COA 발행 여부(성적번호)', '판정']
         
-        st.markdown('<div class="sub-header" style="margin-top:0px;">🔍 맞춤형 대장 필터</div>', unsafe_allow_html=True)
+        # 🌟 [제안2 기능] 날짜 필터 추가
+        st.markdown('<div class="sub-header" style="margin-top:0px;">🔍 맞춤형 대장 검색 및 필터</div>', unsafe_allow_html=True)
+        col_d1, col_d2 = st.columns(2)
+        with col_d1: search_start = st.date_input("📅 조회 시작일 (접수 일자 기준)", datetime.date.today() - datetime.timedelta(days=90))
+        with col_d2: search_end = st.date_input("📅 조회 종료일 (접수 일자 기준)", datetime.date.today())
+        
+        # 날짜 필터 즉시 적용
+        df_display = df_display[(df_display['접수 일자'] >= str(search_start)) & (df_display['접수 일자'] <= str(search_end))]
+        
         col_f1, col_f2, col_f3, col_f4 = st.columns(4)
         with col_f1: sel_cat = st.selectbox("📌 의뢰 구분", ["전체"] + sorted(df_display['시험 의뢰 구분'].unique().tolist()))
         with col_f2: sel_item = st.multiselect("📦 품명 선택", sorted(df_display['품명'].unique().tolist()))
@@ -331,6 +329,8 @@ elif selected == "접수 대장 조회":
         if sel_jdg: df_display = df_display[df_display['판정'].isin(sel_jdg)]
             
         st.write("")
+        st.markdown(f"**총 {len(df_display)}건의 데이터를 조회했습니다.**")
+        
         def highlight_fail_row(row):
             if row['판정'] == '부적합': return ['background-color: #FFE6E6; color: #D8000C; font-weight: bold'] * len(row)
             return [''] * len(row)
@@ -341,7 +341,7 @@ elif selected == "접수 대장 조회":
         csv = df_display.to_csv(index=False).encode('utf-8-sig') 
         st.download_button("📥 현재 화면의 대장 엑셀(CSV) 다운로드", data=csv, file_name="QC_시험접수대장.csv", mime="text/csv")
         
-        # 🌟 [신규 추가] 개별 데이터 수정/삭제 UI
+        # 개별 데이터 수정/삭제 UI
         st.markdown("---")
         st.markdown('<div class="sub-header">⚙️ 개별 접수 내역 수정 및 취소(삭제)</div>', unsafe_allow_html=True)
         with st.expander("데이터 수정 또는 개별 삭제를 원하시면 여기를 클릭하세요."):
@@ -376,6 +376,59 @@ elif selected == "접수 대장 조회":
                             st.session_state.flash_msgs.append(("해당 데이터가 삭제되었습니다.", "success"))
                             st.rerun()
 
+    st.markdown("---")
+    with st.expander("📥 과거 엑셀/CSV 데이터 일괄 업로드 (Import) - 클릭하여 열기", expanded=False):
+        st.info("이곳에 업로드된 데이터는 시스템 로직과 충돌하지 않도록 **'완료된 과거 데이터'**로 취급되어 대장 조회와 결과 조회 화면에만 나타납니다.")
+        
+        template_df = pd.DataFrame(columns=["접수 일자", "품명", "품목 코드", "제조번호", "입고등록번호", "의뢰 일자", "시험 의뢰 구분", "시험 의뢰 항목", "시험 번호", "의뢰자", "비고", "COA 발행 여부(성적번호)", "판정"])
+        template_csv = template_df.to_csv(index=False).encode('utf-8-sig')
+        st.download_button("1️⃣ 엑셀 업로드용 템플릿 양식 다운로드 (대장과 동일)", data=template_csv, file_name="Import_Template.csv", mime="text/csv")
+        
+        uploaded_file = st.file_uploader("2️⃣ 작성한 템플릿 파일(CSV)을 업로드하세요", type=["csv"])
+        if uploaded_file is not None:
+            try:
+                bytes_data = uploaded_file.getvalue()
+                try:
+                    import_df = pd.read_csv(io.BytesIO(bytes_data), encoding='utf-8-sig')
+                except UnicodeDecodeError:
+                    import_df = pd.read_csv(io.BytesIO(bytes_data), encoding='cp949')
+                    
+                st.success(f"✅ 파일을 성공적으로 읽었습니다! (총 {len(import_df)}건의 데이터 확인)")
+                
+                if st.button("🚀 데이터 일괄 업로드 실행", type="primary", use_container_width=True):
+                    with conn.session as s:
+                        for _, row in import_df.iterrows():
+                            dummy_assigns = json.dumps({"Legacy Data": {"status": "완료", "pass_fail": str(row.get('판정', ''))}}, ensure_ascii=False)
+                            s.execute(
+                                text("""
+                                INSERT INTO reception_logs 
+                                (reception_date, req_date, category, item_name, item_code, batch_no, in_no, requester, selected_tests, assignments, remarks, test_no, coa_no, judgment)
+                                VALUES (:reception_date, :req_date, :category, :item_name, :item_code, :batch_no, :in_no, :requester, :selected_tests, :assignments, :remarks, :test_no, :coa_no, :judgment)
+                                """),
+                                {
+                                    "reception_date": str(row.get('접수 일자', '')), "req_date": str(row.get('의뢰 일자', '')), "category": str(row.get('시험 의뢰 구분', '')),
+                                    "item_name": str(row.get('품명', '')), "item_code": str(row.get('품목 코드', '')), "batch_no": str(row.get('제조번호', '')), 
+                                    "in_no": str(row.get('입고등록번호', '')), "requester": str(row.get('의뢰자', '')), "selected_tests": str(row.get('시험 의뢰 항목', '')), 
+                                    "assignments": dummy_assigns, "remarks": str(row.get('비고', '')), 
+                                    "test_no": str(row.get('시험 번호', '-')), "coa_no": str(row.get('COA 발행 여부(성적번호)', '엑셀이관')), "judgment": str(row.get('판정', ''))
+                                }
+                            )
+                        s.commit()
+                    st.session_state.flash_msgs.append((f"🎉 {len(import_df)}건의 과거 데이터가 성공적으로 대장에 등록되었습니다!", 'success'))
+                    st.rerun()
+            except Exception as e:
+                st.error(f"업로드 중 오류가 발생했습니다. 양식을 다시 확인해주세요. (에러: {e})")
+        
+        st.markdown("---")
+        st.markdown("💡 **테스트 업로드를 지우고 싶으신가요?** 아래 버튼을 누르면 엑셀로 업로드했던 데이터만 한 번에 싹 지워집니다.")
+        if st.button("🗑️ 엑셀 업로드 데이터(엑셀이관) 전체 일괄 삭제", type="secondary"):
+            with conn.session as s:
+                s.execute(text("DELETE FROM reception_logs WHERE coa_no = '엑셀이관'"))
+                s.commit()
+            st.session_state.flash_msgs.append(("🗑️ 엑셀로 업로드된 테스트 데이터가 모두 초기화되었습니다.", 'info'))
+            st.rerun()
+
+
 # --- 📅 전체 스케줄 보드 창 ---
 elif selected == "전체 스케줄 보드":
     st.markdown('<div class="custom-header">📅 QC 시험 스케줄 보드</div>', unsafe_allow_html=True)
@@ -390,7 +443,7 @@ elif selected == "전체 스케줄 보드":
         try:
             assigns = row['assignments']
             if isinstance(assigns, str): assigns = json.loads(assigns)
-            if "Legacy Data" in assigns: continue # 엑셀 수입 데이터는 달력에서 제외
+            if "Legacy Data" in assigns: continue 
             for t, val in assigns.items():
                 all_tests.add(t)
                 all_assignees.add(val.get("assignee", "미정"))
@@ -495,7 +548,6 @@ elif selected == "결과 입력 (CoA)":
     st.markdown('<div class="custom-header">✅ 시험 결과 입력 및 CoA 발행</div>', unsafe_allow_html=True)
     st.write("💡 실제 결과값(Raw Data)과 판정(적합/부적합)을 입력하세요.")
     
-    # [방어 로직] coa_no가 없거나 비어있는 진짜 '진행 중' 데이터만 불러오기 (엑셀 이관 데이터 제외)
     df = conn.query("SELECT id, reception_date, item_name, assignments, coa_no, test_no, batch_no FROM reception_logs WHERE (coa_no IS NULL OR coa_no = '') AND (coa_no != '엑셀이관') ORDER BY id DESC", ttl="0")
     
     if df.empty: st.info("현재 대기 중이거나 진행 중인 시험 내역이 없습니다.")
@@ -507,7 +559,6 @@ elif selected == "결과 입력 (CoA)":
             if isinstance(assigns_data, str): assignments = json.loads(assigns_data)
             else: assignments = assigns_data
             
-            # 방어 로직 (엑셀 데이터가 실수로 잡히지 않도록)
             if "Legacy Data" in assignments: continue
             
             for t, val in assignments.items():
@@ -600,34 +651,40 @@ elif selected == "결과 입력 (CoA)":
                             with conn.session as s:
                                 s.execute(text("UPDATE reception_logs SET coa_no=:coa, judgment=:jdg WHERE id=:id"), {"coa": new_coa_no, "jdg": final_jdg, "id": r_id})
                                 s.commit()
-                            st.success("CoA 발행 및 최종 판정이 완료되어 대장에 등록되었습니다!")
+                            st.session_state.flash_msgs.append(("CoA 발행 및 최종 판정이 완료되어 대장에 등록되었습니다!", "success"))
                             st.rerun()
                         else: st.error("성적번호를 입력하세요.")
         except: pass
 
 
-# --- 🔎 시험 결과 조회 (🌟 기능 2: 완료된 시험 상세 조회) ---
+# --- 🔎 시험 결과 조회 (🌟 제안 2: 달력(기간) 필터 추가 적용) ---
 elif selected == "시험 결과 조회":
     st.markdown('<div class="custom-header">🔎 시험 결과 및 판정 상세 조회</div>', unsafe_allow_html=True)
     st.write("발행 완료된 성적서(CoA) 및 과거 데이터를 기반으로 각 품목의 최종 결과와 세부 시험 항목의 결과를 조회합니다.")
     
-    # CoA가 발행되었거나 엑셀로 이관된(완료된) 데이터만 가져오기
     df = conn.query("SELECT * FROM reception_logs WHERE coa_no IS NOT NULL AND coa_no != '' AND coa_no != '-' ORDER BY id DESC", ttl="0")
     
     if df.empty:
         st.info("현재 조회가 가능한 완료된 시험 데이터가 없습니다.")
     else:
-        # 상단 필터부
+        # 날짜 필터 최상단 적용
+        st.markdown('<div class="sub-header" style="margin-top:0px;">🔍 결과 조회 필터 (기간 및 조건)</div>', unsafe_allow_html=True)
+        col_d1, col_d2 = st.columns(2)
+        with col_d1: search_start = st.date_input("📅 조회 시작일 (접수 일자 기준)", datetime.date.today() - datetime.timedelta(days=90))
+        with col_d2: search_end = st.date_input("📅 조회 종료일 (접수 일자 기준)", datetime.date.today())
+        
+        df = df[(df['reception_date'] >= str(search_start)) & (df['reception_date'] <= str(search_end))]
+
         col_s1, col_s2, col_s3, col_s4 = st.columns(4)
         with col_s1: search_item = st.multiselect("📦 품명 선택", sorted(df['item_name'].dropna().unique().tolist()))
         with col_s2: search_testno = st.multiselect("🏷️ 시험번호 선택", sorted(df[df['test_no'] != '-']['test_no'].dropna().unique().tolist()))
         with col_s3: search_batch = st.multiselect("🔢 제조번호 선택", sorted(df['batch_no'].dropna().unique().tolist()))
-        with col_s4: search_inno = st.multiselect("📥 입고번호 선택", sorted(df['in_no'].dropna().unique().tolist()))
+        with col_s4: search_jdg = st.multiselect("⚖️ 판정 선택", sorted(df['judgment'].dropna().unique().tolist()))
 
         if search_item: df = df[df['item_name'].isin(search_item)]
         if search_testno: df = df[df['test_no'].isin(search_testno)]
         if search_batch: df = df[df['batch_no'].isin(search_batch)]
-        if search_inno: df = df[df['in_no'].isin(search_inno)]
+        if search_jdg: df = df[df['judgment'].isin(search_jdg)]
 
         st.markdown("---")
         st.markdown(f"**총 {len(df)}건의 완료된 데이터를 찾았습니다.**")
@@ -640,7 +697,6 @@ elif selected == "시험 결과 조회":
             coa_no = row['coa_no']
             jdg = row['judgment']
             
-            # 판정 색상 부여
             jdg_color = "red" if jdg == "부적합" else "green"
             
             with st.expander(f"📄 [{item}] 제조번호: {batch} | 성적번호: {coa_no} | 판정: {jdg}"):
@@ -689,7 +745,7 @@ elif selected == "PQR 경향 분석":
             try:
                 assigns = row['assignments']
                 if isinstance(assigns, str): assigns = json.loads(assigns)
-                if "Legacy Data" in assigns: continue # 엑셀 데이터는 PQR 통계에서 제외
+                if "Legacy Data" in assigns: continue 
                 for t_name, info in assigns.items():
                     res_dict = info.get("result", {})
                     if isinstance(res_dict, dict):
@@ -745,26 +801,70 @@ elif selected == "PQR 경향 분석":
 
 # --- ⚙️ 설정 메뉴 ---
 elif selected == "설정":
-    st.markdown('<div class="custom-header">⚙️ 시스템 설정</div>', unsafe_allow_html=True)
+    st.markdown('<div class="custom-header">⚙️ 시스템 설정 (DB 자동 저장 중)</div>', unsafe_allow_html=True)
     tab1, tab2, tab3, tab4 = st.tabs(["🧪 시험 항목/그룹 관리", "👤 사용자 관리", "⚙️ 세부 파라미터 마스터", "📦 품명(제품명) 마스터"])
     
     with tab1:
-        st.markdown('<div class="sub-header">1. 새로운 시험 항목 추가</div>', unsafe_allow_html=True)
+        st.markdown('<div class="sub-header">1. 새로운 커스텀 시험 항목 추가</div>', unsafe_allow_html=True)
         col_t1, col_t2 = st.columns([3, 1])
         with col_t1: new_test = st.text_input("새로운 시험 항목 이름 입력", label_visibility="collapsed")
         with col_t2:
             if st.button("➕ 항목 추가", use_container_width=True):
                 if new_test and new_test not in st.session_state.custom_tests and new_test not in base_tests:
-                    st.session_state.custom_tests.append(new_test)
+                    new_list = list(st.session_state.custom_tests)
+                    new_list.append(new_test)
+                    save_setting('custom_tests', new_list)
+                    st.session_state.flash_msgs.append((f"'{new_test}' 항목이 성공적으로 추가되었습니다.", "success"))
                     st.rerun()
+                    
         st.markdown("---")
-        st.markdown('<div class="sub-header">2. 그룹(묶음) 만들기 / 삭제</div>', unsafe_allow_html=True)
+        st.markdown('<div class="sub-header">2. 기존 커스텀 시험 항목 수정 / 삭제</div>', unsafe_allow_html=True)
+        if st.session_state.custom_tests:
+            col_m1, col_m2, col_m3 = st.columns([2, 2, 1])
+            with col_m1:
+                target_test = st.selectbox("수정/삭제할 항목 선택", st.session_state.custom_tests)
+            with col_m2:
+                rename_test = st.text_input("변경할 이름 입력", value=target_test)
+            with col_m3:
+                btn_m1, btn_m2 = st.columns(2)
+                if btn_m1.button("🔄 수정"):
+                    if rename_test and rename_test != target_test and rename_test not in base_tests:
+                        new_list = list(st.session_state.custom_tests)
+                        idx = new_list.index(target_test)
+                        new_list[idx] = rename_test
+                        save_setting('custom_tests', new_list)
+                        st.session_state.flash_msgs.append((f"'{target_test}' 항목이 '{rename_test}'(으)로 수정되었습니다.", "success"))
+                        st.rerun()
+                if btn_m2.button("🗑️ 삭제"):
+                    new_list = list(st.session_state.custom_tests)
+                    new_list.remove(target_test)
+                    save_setting('custom_tests', new_list)
+                    st.session_state.flash_msgs.append((f"'{target_test}' 항목이 삭제되었습니다.", "success"))
+                    st.rerun()
+        else:
+            st.info("사용자가 직접 추가한 커스텀 시험 항목이 없습니다. (기본 내장 항목은 시스템 안정성을 위해 수정/삭제가 불가능합니다)")
+
+        st.markdown("---")
+        st.markdown('<div class="sub-header">3. 그룹(묶음) 프리셋 만들기 / 삭제</div>', unsafe_allow_html=True)
         new_group_name = st.text_input("새 그룹 이름")
         new_group_items = st.multiselect("이 그룹에 포함될 시험 항목 선택", all_available_tests)
         if st.button("💾 새 그룹 저장"):
             if new_group_name and new_group_items:
-                st.session_state.test_groups[new_group_name] = new_group_items
+                new_dict = dict(st.session_state.test_groups)
+                new_dict[new_group_name] = new_group_items
+                save_setting('test_groups', new_dict)
+                st.session_state.flash_msgs.append((f"'{new_group_name}' 프리셋 그룹이 성공적으로 저장되었습니다.", "success"))
                 st.rerun()
+                
+        if st.session_state.test_groups:
+            del_group_name = st.selectbox("삭제할 그룹 프리셋을 선택하세요", ["선택 안 함"] + list(st.session_state.test_groups.keys()))
+            if st.button("🗑️ 선택한 그룹 프리셋 삭제"):
+                if del_group_name != "선택 안 함":
+                    new_dict = dict(st.session_state.test_groups)
+                    del new_dict[del_group_name]
+                    save_setting('test_groups', new_dict)
+                    st.session_state.flash_msgs.append((f"'{del_group_name}' 프리셋 그룹이 삭제되었습니다.", "success"))
+                    st.rerun()
 
     with tab2: st.write("추후 개발 예정 (부서원 추가 등)")
         
@@ -774,9 +874,16 @@ elif selected == "설정":
         current_params = st.session_state.test_master.get(selected_master_test, [])
         params_str = st.text_input("하위 파라미터 입력 (쉼표로 구분)", value=", ".join(current_params))
         if st.button("💾 마스터 설정 저장", type="primary"):
-            if params_str.strip(): st.session_state.test_master[selected_master_test] = [p.strip() for p in params_str.split(",") if p.strip()]
+            new_dict = dict(st.session_state.test_master)
+            if params_str.strip(): 
+                new_dict[selected_master_test] = [p.strip() for p in params_str.split(",") if p.strip()]
+                save_setting('test_master', new_dict)
+                st.session_state.flash_msgs.append((f"'{selected_master_test}'의 세부 파라미터가 성공적으로 저장되었습니다.", "success"))
             else:
-                if selected_master_test in st.session_state.test_master: del st.session_state.test_master[selected_master_test]
+                if selected_master_test in new_dict: 
+                    del new_dict[selected_master_test]
+                    save_setting('test_master', new_dict)
+                    st.session_state.flash_msgs.append((f"'{selected_master_test}'의 세부 파라미터가 초기화되었습니다.", "success"))
             st.rerun()
             
     with tab4:
@@ -784,11 +891,17 @@ elif selected == "설정":
         new_item_master = st.text_input("새로 등록할 품명(제품명) 입력")
         if st.button("➕ 품명 목록에 추가하기"):
             if new_item_master and new_item_master not in st.session_state.item_master:
-                st.session_state.item_master.append(new_item_master)
+                new_list = list(st.session_state.item_master)
+                new_list.append(new_item_master)
+                save_setting('item_master', new_list)
+                st.session_state.flash_msgs.append((f"'{new_item_master}' 품명이 마스터 목록에 추가되었습니다.", "success"))
                 st.rerun()
         st.markdown("---")
         del_item_master = st.selectbox("삭제할 품명을 선택하세요", ["선택 안 함"] + st.session_state.item_master)
         if st.button("🗑️ 선택한 품명 삭제"):
             if del_item_master != "선택 안 함":
-                st.session_state.item_master.remove(del_item_master)
+                new_list = list(st.session_state.item_master)
+                new_list.remove(del_item_master)
+                save_setting('item_master', new_list)
+                st.session_state.flash_msgs.append((f"'{del_item_master}' 품명이 목록에서 삭제되었습니다.", "success"))
                 st.rerun()
