@@ -247,8 +247,8 @@ elif selected == "시험 접수 및 배정":
 elif selected == "접수 대장 조회":
     st.markdown('<div class="custom-header">📂 시험 접수 대장 조회 및 데이터 관리</div>', unsafe_allow_html=True)
     
-    # 🌟 [신규 기능 1] 엑셀 데이터 Import 기능
-    with st.expander("📥 과거 엑셀/CSV 데이터 일괄 업로드 (Import) - 클릭하여 열기"):
+    # 🌟 [수정됨] expanded=True 를 추가하여 파일 업로드 후 화면이 새로고침돼도 창이 닫히지 않게 고정!
+    with st.expander("📥 과거 엑셀/CSV 데이터 일괄 업로드 (Import) - 클릭하여 열기", expanded=True):
         st.info("이곳에 업로드된 데이터는 시스템 로직과 충돌하지 않도록 **'완료된 과거 데이터'**로 취급되어 대장 조회와 결과 조회 화면에만 나타납니다. (진행 중 카운트 및 결과 입력 창에는 반영되지 않습니다.)")
         
         # 템플릿 다운로드 제공 (실제 대장 컬럼과 100% 동일하게 매핑!)
@@ -259,12 +259,12 @@ elif selected == "접수 대장 조회":
         uploaded_file = st.file_uploader("2️⃣ 작성한 템플릿 파일(CSV)을 업로드하세요", type=["csv"])
         if uploaded_file is not None:
             try:
-                # 🌟 [수정됨] 엑셀(한글) 인코딩 호환성 문제 완벽 해결
+                # 🌟 [수정됨] 메모리 버퍼 방식으로 파일 읽기 강화 (인코딩 및 읽기 에러 완벽 차단)
+                bytes_data = uploaded_file.getvalue()
                 try:
-                    import_df = pd.read_csv(uploaded_file, encoding='utf-8-sig')
+                    import_df = pd.read_csv(io.BytesIO(bytes_data), encoding='utf-8-sig')
                 except UnicodeDecodeError:
-                    uploaded_file.seek(0) # 커서를 다시 처음으로 되돌림
-                    import_df = pd.read_csv(uploaded_file, encoding='cp949') # 한국형 엑셀 인코딩으로 재시도
+                    import_df = pd.read_csv(io.BytesIO(bytes_data), encoding='cp949')
                     
                 st.success(f"✅ 파일을 성공적으로 읽었습니다! (총 {len(import_df)}건의 데이터 확인)")
                 
