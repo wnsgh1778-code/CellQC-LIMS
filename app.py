@@ -251,10 +251,10 @@ elif selected == "접수 대장 조회":
     with st.expander("📥 과거 엑셀/CSV 데이터 일괄 업로드 (Import) - 클릭하여 열기"):
         st.info("이곳에 업로드된 데이터는 시스템 로직과 충돌하지 않도록 **'완료된 과거 데이터'**로 취급되어 대장 조회와 결과 조회 화면에만 나타납니다. (진행 중 카운트 및 결과 입력 창에는 반영되지 않습니다.)")
         
-        # 템플릿 다운로드 제공
-        template_df = pd.DataFrame(columns=["접수일자", "의뢰일자", "시험의뢰구분", "품명", "품목코드", "제조번호", "입고등록번호", "의뢰자", "시험항목", "비고", "성적번호(COA)", "최종판정"])
+        # 템플릿 다운로드 제공 (실제 대장 컬럼과 100% 동일하게 매핑!)
+        template_df = pd.DataFrame(columns=["접수 일자", "품명", "품목 코드", "제조번호", "입고등록번호", "의뢰 일자", "시험 의뢰 구분", "시험 의뢰 항목", "시험 번호", "의뢰자", "비고", "COA 발행 여부(성적번호)", "판정"])
         template_csv = template_df.to_csv(index=False).encode('utf-8-sig')
-        st.download_button("1️⃣ 엑셀 업로드용 템플릿 양식 다운로드", data=template_csv, file_name="Import_Template.csv", mime="text/csv")
+        st.download_button("1️⃣ 엑셀 업로드용 템플릿 양식 다운로드 (대장과 동일)", data=template_csv, file_name="Import_Template.csv", mime="text/csv")
         
         uploaded_file = st.file_uploader("2️⃣ 작성한 템플릿 파일(CSV)을 업로드하세요", type=["csv"])
         if uploaded_file is not None:
@@ -265,7 +265,7 @@ elif selected == "접수 대장 조회":
                     with conn.session as s:
                         for _, row in import_df.iterrows():
                             # 과거 데이터 방어용 더미 JSON
-                            dummy_assigns = json.dumps({"Legacy Data": {"status": "완료", "pass_fail": str(row.get('최종판정', ''))}}, ensure_ascii=False)
+                            dummy_assigns = json.dumps({"Legacy Data": {"status": "완료", "pass_fail": str(row.get('판정', ''))}}, ensure_ascii=False)
                             s.execute(
                                 text("""
                                 INSERT INTO reception_logs 
@@ -273,11 +273,11 @@ elif selected == "접수 대장 조회":
                                 VALUES (:reception_date, :req_date, :category, :item_name, :item_code, :batch_no, :in_no, :requester, :selected_tests, :assignments, :remarks, :test_no, :coa_no, :judgment)
                                 """),
                                 {
-                                    "reception_date": str(row.get('접수일자', '')), "req_date": str(row.get('의뢰일자', '')), "category": str(row.get('시험의뢰구분', '')),
-                                    "item_name": str(row.get('품명', '')), "item_code": str(row.get('품목코드', '')), "batch_no": str(row.get('제조번호', '')), 
-                                    "in_no": str(row.get('입고등록번호', '')), "requester": str(row.get('의뢰자', '')), "selected_tests": str(row.get('시험항목', '')), 
+                                    "reception_date": str(row.get('접수 일자', '')), "req_date": str(row.get('의뢰 일자', '')), "category": str(row.get('시험 의뢰 구분', '')),
+                                    "item_name": str(row.get('품명', '')), "item_code": str(row.get('품목 코드', '')), "batch_no": str(row.get('제조번호', '')), 
+                                    "in_no": str(row.get('입고등록번호', '')), "requester": str(row.get('의뢰자', '')), "selected_tests": str(row.get('시험 의뢰 항목', '')), 
                                     "assignments": dummy_assigns, "remarks": str(row.get('비고', '')), 
-                                    "test_no": "-", "coa_no": str(row.get('성적번호(COA)', '엑셀이관')), "judgment": str(row.get('최종판정', ''))
+                                    "test_no": str(row.get('시험 번호', '-')), "coa_no": str(row.get('COA 발행 여부(성적번호)', '엑셀이관')), "judgment": str(row.get('판정', ''))
                                 }
                             )
                         s.commit()
